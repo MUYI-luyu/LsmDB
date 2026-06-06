@@ -37,6 +37,24 @@ target_include_directories(lsmdb_memtable
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
 
+# ──────────────────── WriteBatch 批量写入 ────────────────────
+
+add_library(lsmdb_writebatch
+  src/db/write_batch.cc
+)
+
+target_link_libraries(lsmdb_writebatch
+  PUBLIC
+    lsmdb_memtable
+)
+
+target_include_directories(lsmdb_writebatch
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
+
 add_library(lsmdb_sstable
   src/sstable/table/block.cc
   src/sstable/table/block_builder.cc
@@ -100,6 +118,23 @@ target_link_libraries(logging_test
     pthread
 )
 target_include_directories(logging_test
+  PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
+
+# ──────────────────── WriteBatch 测试 ────────────────────
+
+add_executable(write_batch_test
+  src/db/write_batch_test.cc
+)
+target_link_libraries(write_batch_test
+  PRIVATE
+    lsmdb_writebatch
+    GTest::GTest
+    GTest::Main
+    pthread
+)
+target_include_directories(write_batch_test
   PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
