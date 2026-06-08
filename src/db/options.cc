@@ -1,11 +1,12 @@
 #include "db/options.h"
 
 #include "db/comparator.h"
+#include "db/env.h"
 
 namespace lsmdb {
 
 Options::Options()
     : comparator(BytewiseComparator()),
-      env(nullptr) {}
+      env(Env::Default()) {}
 
 }  // namespace lsmdb
