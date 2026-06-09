@@ -9,9 +9,13 @@ add_library(lsmdb_core
   src/utils/coding.cc
   src/utils/hash.cc
   src/utils/crc32c.cc
+  src/utils/cache.cc
   src/utils/logging.cc
+  src/utils/env_posix.cc
+  src/utils/testutil.cc
   src/memtable/arena.cc
   src/sstable/iterator/iterator.cc
+  src/db/env.cc
 )
 
 target_include_directories(lsmdb_core
@@ -26,7 +30,6 @@ add_library(lsmdb_memtable
   src/db/dbformat.cc
   src/db/comparator.cc
   src/db/options.cc
-  src/db/env.cc
 )
 
 target_link_libraries(lsmdb_memtable PUBLIC lsmdb_core)
