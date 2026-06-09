@@ -61,6 +61,7 @@ target_include_directories(lsmdb_writebatch
 add_library(lsmdb_sstable
   src/sstable/table/block.cc
   src/sstable/table/block_builder.cc
+  src/sstable/table/filter_block.cc
   src/sstable/table/format.cc
 )
 
