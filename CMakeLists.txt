@@ -63,6 +63,7 @@ add_library(lsmdb_sstable
   src/sstable/table/block_builder.cc
   src/sstable/table/filter_block.cc
   src/sstable/table/format.cc
+  src/sstable/table/table_builder.cc
 )
 
 target_link_libraries(lsmdb_sstable
