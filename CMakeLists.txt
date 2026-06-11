@@ -65,6 +65,7 @@ add_library(lsmdb_sstable
   src/sstable/table/format.cc
   src/sstable/table/table_builder.cc
   src/sstable/iterator/merger.cc
+  src/sstable/iterator/two_level_iterator.cc
 )
 
 target_link_libraries(lsmdb_sstable
