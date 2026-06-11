@@ -63,6 +63,7 @@ add_library(lsmdb_sstable
   src/sstable/table/block_builder.cc
   src/sstable/table/filter_block.cc
   src/sstable/table/format.cc
+  src/sstable/table/table.cc
   src/sstable/table/table_builder.cc
   src/sstable/iterator/merger.cc
   src/sstable/iterator/two_level_iterator.cc
