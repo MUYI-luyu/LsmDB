@@ -146,3 +146,20 @@ target_include_directories(write_batch_test
   PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
+
+# ──────────────────── SSTable 过滤器块测试 ────────────────────
+
+add_executable(filter_block_test
+  src/sstable/table/filter_block_test.cc
+)
+target_link_libraries(filter_block_test
+  PRIVATE
+    lsmdb_sstable
+    GTest::GTest
+    GTest::Main
+    pthread
+)
+target_include_directories(filter_block_test
+  PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
