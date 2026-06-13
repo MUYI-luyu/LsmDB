@@ -83,6 +83,24 @@ target_include_directories(lsmdb_sstable
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
 
+# ──────────────────── WAL 预写日志 ────────────────────
+
+add_library(lsmdb_wal
+  src/wal/log_writer.cc
+)
+
+target_link_libraries(lsmdb_wal
+  PUBLIC
+    lsmdb_core
+)
+
+target_include_directories(lsmdb_wal
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
+
 find_package(GTest REQUIRED)
 
 add_executable(skiplist_test
