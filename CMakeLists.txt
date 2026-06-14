@@ -87,6 +87,7 @@ target_include_directories(lsmdb_sstable
 
 add_library(lsmdb_wal
   src/wal/log_writer.cc
+  src/wal/log_reader.cc
 )
 
 target_link_libraries(lsmdb_wal
