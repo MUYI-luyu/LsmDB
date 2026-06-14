@@ -33,21 +33,21 @@ Writer::~Writer() = default;
 
 Status Writer::AddRecord(const Slice& slice) {
   const char* ptr = slice.data();
-  size_t left = slice.size();
+  size_t slice_left = slice.size();
 
-  // 如果必要，分片记录并发出它。注意，如果 slice 为空，
-  // 我们仍然希望迭代一次以发出单个零长度记录
+  // 如果必要，分片记录并发出它。如果 slice 为空，
+  // 仍然希望迭代一次以发出单个零长度记录
   Status s;
   bool begin = true;
   do {
-    const int leftover = kBlockSize - block_offset_;
-    assert(leftover >= 0);
-    if (leftover < kHeaderSize) {
+    const int block_left = kBlockSize - block_offset_;
+    assert(block_left >= 0);
+    if (block_left < kHeaderSize) {
       // 切换到新块
-      if (leftover > 0) {
+      if (block_left > 0) {
         // 填充尾部（下面的字面值依赖于 kHeaderSize 为 7）
         static_assert(kHeaderSize == 7, "");
-        dest_->Append(Slice("\x00\x00\x00\x00\x00\x00", leftover));
+        dest_->Append(Slice("\x00\x00\x00\x00\x00\x00", block_left));
       }
       block_offset_ = 0;
     }
@@ -56,10 +56,11 @@ Status Writer::AddRecord(const Slice& slice) {
     assert(kBlockSize - block_offset_ - kHeaderSize >= 0);
     // avail: 计算当前 32KB 抽屉里，扣除 7 字节封条后，还能塞多少纯数据
     const size_t avail = kBlockSize - block_offset_ - kHeaderSize;
-    const size_t fragment_length = (left < avail) ? left : avail; // min(left, avail)
+    // 本次写入长度 min(slice_left, avail)
+    const size_t fragment_length = (slice_left < avail) ? slice_left : avail; 
 
     RecordType type;
-    const bool end = (left == fragment_length);
+    const bool end = (slice_left == fragment_length);
     if (begin && end) {
       type = kFullType;
     } else if (begin) {
@@ -72,9 +73,9 @@ Status Writer::AddRecord(const Slice& slice) {
 
     s = EmitPhysicalRecord(type, ptr, fragment_length);
     ptr += fragment_length;
-    left -= fragment_length;
+    slice_left -= fragment_length;
     begin = false;
-  } while (s.ok() && left > 0);
+  } while (s.ok() && slice_left > 0);
   return s;
 }
 
