@@ -182,3 +182,20 @@ target_include_directories(filter_block_test
   PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
+
+# ──────────────────── WAL 日志测试 ────────────────────
+
+add_executable(log_test
+  src/wal/log_test.cc
+)
+target_link_libraries(log_test
+  PRIVATE
+    lsmdb_wal
+    GTest::GTest
+    GTest::Main
+    pthread
+)
+target_include_directories(log_test
+  PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
