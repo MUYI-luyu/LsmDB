@@ -85,12 +85,22 @@ bool Reader::ReadRecord(Slice* record, std::string* scratch) {
 
     switch (record_type) {
       case kFullType:
+        if (in_fragmented_record) {
+          if (!scratch->empty()) {
+            ReportCorruption(scratch->size(), "partial record without end(1)");
+          }
+        }
         prospective_record_offset = physical_record_offset;
         *record = fragment;
         last_record_offset_ = prospective_record_offset;
         return true;
 
       case kFirstType:
+        if (in_fragmented_record) {
+          if (!scratch->empty()) {
+            ReportCorruption(scratch->size(), "partial record without end(2)");
+          }
+        }
         prospective_record_offset = physical_record_offset;
         scratch->assign(fragment.data(), fragment.size());
         in_fragmented_record = true;
@@ -130,7 +140,6 @@ bool Reader::ReadRecord(Slice* record, std::string* scratch) {
           ReportCorruption(scratch->size(), "error in middle of record");
           in_fragmented_record = false;
           scratch->clear();
-          resyncing_ = true;
         }
         break;
 
@@ -142,7 +151,6 @@ bool Reader::ReadRecord(Slice* record, std::string* scratch) {
             buf);
         in_fragmented_record = false;
         scratch->clear();
-        resyncing_ = true;
         break;
       }
     }
