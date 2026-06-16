@@ -16,6 +16,7 @@ add_library(lsmdb_core
   src/memtable/arena.cc
   src/sstable/iterator/iterator.cc
   src/db/env.cc
+  src/db/filename.cc
 )
 
 target_include_directories(lsmdb_core
