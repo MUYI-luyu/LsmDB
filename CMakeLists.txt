@@ -104,6 +104,26 @@ target_include_directories(lsmdb_wal
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
 
+# ──────────────────── MVCC 版本管理 ────────────────────
+
+add_library(lsmdb_mvcc
+  src/mvcc/version_edit.cc
+)
+
+target_link_libraries(lsmdb_mvcc
+  PUBLIC
+    lsmdb_core
+  PRIVATE
+    lsmdb_memtable
+)
+
+target_include_directories(lsmdb_mvcc
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
+
 find_package(GTest REQUIRED)
 
 add_executable(skiplist_test
