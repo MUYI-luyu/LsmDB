@@ -221,3 +221,20 @@ target_include_directories(log_test
   PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
+
+# ──────────────────── VersionEdit 测试 ────────────────────
+
+add_executable(version_edit_test
+  src/mvcc/version_edit_test.cc
+)
+target_link_libraries(version_edit_test
+  PRIVATE
+    lsmdb_mvcc
+    GTest::GTest
+    GTest::Main
+    pthread
+)
+target_include_directories(version_edit_test
+  PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
