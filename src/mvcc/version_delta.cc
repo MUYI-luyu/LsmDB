@@ -1,12 +1,12 @@
-#include "mvcc/version_edit.h"
+#include "mvcc/version_delta.h"
 
-#include "mvcc/version_set.h"
+#include "mvcc/version_catalog.h"
 #include "utils/coding.h"
 #include "utils/logging.h"
 
 namespace lsmdb {
 
-// VersionEdit 序列化后各字段的 Tag 编号。
+// VersionDelta 序列化后各字段的 Tag 编号。
 // 这些编号会被持久化写入磁盘文件，因此定义后不得更改。
 enum Tag {
   kComparator = 1,      // 比较器类型标识
@@ -19,7 +19,7 @@ enum Tag {
   kPrevLogNumber = 8    // 前一个日志文件编号
 };
 
-void VersionEdit::Clear() {
+void VersionDelta::Clear() {
   comparator_.clear();
   log_number_ = 0;
   prev_log_number_ = 0;
@@ -35,7 +35,7 @@ void VersionEdit::Clear() {
   new_files_.clear();
 }
 
-void VersionEdit::EncodeTo(std::string* dst) const {
+void VersionDelta::EncodeTo(std::string* dst) const {
   if (has_comparator_) {
     PutVarint32(dst, kComparator);
     PutLengthPrefixedSlice(dst, comparator_);
@@ -70,7 +70,7 @@ void VersionEdit::EncodeTo(std::string* dst) const {
   }
 
   for (size_t i = 0; i < new_files_.size(); i++) {
-    const FileMetaData& f = new_files_[i].second;
+    const SSTableDescriptor& f = new_files_[i].second;
     PutVarint32(dst, kNewFile);
     PutVarint32(dst, new_files_[i].first);  // level
     PutVarint64(dst, f.number);
@@ -99,7 +99,7 @@ static bool GetLevel(Slice* input, int* level) {
   }
 }
 
-Status VersionEdit::DecodeFrom(const Slice& src) {
+Status VersionDelta::DecodeFrom(const Slice& src) {
   Clear();
   Slice input = src;
   const char* msg = nullptr;
@@ -108,7 +108,7 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
   // 用于解析的临时存储
   int level;
   uint64_t number;
-  FileMetaData f;
+  SSTableDescriptor f;
   Slice str;
   InternalKey key;
 
@@ -194,14 +194,14 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
 
   Status result;
   if (msg != nullptr) {
-    result = Status::Corruption("VersionEdit", msg);
+    result = Status::Corruption("VersionDelta", msg);
   }
   return result;
 }
 
-std::string VersionEdit::DebugString() const {
+std::string VersionDelta::DebugString() const {
   std::string r;
-  r.append("VersionEdit {");
+  r.append("VersionDelta {");
   if (has_comparator_) {
     r.append("\n  Comparator: ");
     r.append(comparator_);
@@ -235,7 +235,7 @@ std::string VersionEdit::DebugString() const {
     AppendNumberTo(&r, deleted_file.second);
   }
   for (size_t i = 0; i < new_files_.size(); i++) {
-    const FileMetaData& f = new_files_[i].second;
+    const SSTableDescriptor& f = new_files_[i].second;
     r.append("\n  AddFile: ");
     AppendNumberTo(&r, new_files_[i].first);
     r.append(" ");

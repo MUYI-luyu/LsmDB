@@ -9,12 +9,12 @@
 
 namespace lsmdb {
 
-class VersionSet;
+class VersionCatalog;
 
 // SSTable 文件的元数据
-struct FileMetaData {
+struct SSTableDescriptor {
   // 默认构造函数：初始化文件生命线计数
-  FileMetaData() : refs(0), allowed_seeks(1 << 30), file_size(0) {}
+  SSTableDescriptor() : refs(0), allowed_seeks(1 << 30), file_size(0) {}
 
   // 根据文件大小初始化 Seek 寿命阈值
   void InitAllowedSeeks() {
@@ -31,10 +31,10 @@ struct FileMetaData {
 };
 
 // 增量修改单：记录两个版本交替期间发生的状态和资产纯变量变更
-class VersionEdit {
+class VersionDelta {
  public:
-  VersionEdit() { Clear(); }
-  ~VersionEdit() = default;
+  VersionDelta() { Clear(); }
+  ~VersionDelta() = default;
 
   void Clear();
 
@@ -63,11 +63,11 @@ class VersionEdit {
   }
 
   // 将指定的 SSTable 文件（包含身份证元数据）追加到指定层级的新生名单中
-  // 前置要求：当前这个修改单（VersionEdit）还没有被持久化保存到磁盘（参见 VersionSet::SaveTo）
+  // 前置要求：当前这个修改单（VersionDelta）还没有被持久化保存到磁盘（参见 VersionCatalog::SaveTo）
   // 前置要求："smallest" 和 "largest" 必须是该物理文件中真实承载的最小和最大内部键
   void AddFile(int level, uint64_t file, uint64_t file_size,
                const InternalKey& smallest, const InternalKey& largest) {
-    FileMetaData f;
+    SSTableDescriptor f;
     f.number = file;
     f.file_size = file_size;
     f.smallest = smallest;
@@ -89,7 +89,7 @@ class VersionEdit {
   std::string DebugString() const;
 
  private:
-  friend class VersionSet;
+  friend class VersionCatalog;
 
   typedef std::set<std::pair<int, uint64_t>> DeletedFileSet;
 
@@ -106,7 +106,7 @@ class VersionEdit {
 
   std::vector<std::pair<int, InternalKey>> compact_pointers_; // 历史合并断点指针变更集
   DeletedFileSet deleted_files_;                              // 死亡名单：本轮演进注销的文件集合
-  std::vector<std::pair<int, FileMetaData>> new_files_;       // 新生名单：本轮演进诞生并落盘的文件集合
+  std::vector<std::pair<int, SSTableDescriptor>> new_files_;       // 新生名单：本轮演进诞生并落盘的文件集合
 };
 
 }  // namespace lsmdb

@@ -107,7 +107,7 @@ target_include_directories(lsmdb_wal
 # ──────────────────── MVCC 版本管理 ────────────────────
 
 add_library(lsmdb_mvcc
-  src/mvcc/version_edit.cc
+  src/mvcc/version_delta.cc
 )
 
 target_link_libraries(lsmdb_mvcc
@@ -224,17 +224,17 @@ target_include_directories(log_test
 
 # ──────────────────── VersionEdit 测试 ────────────────────
 
-add_executable(version_edit_test
-  src/mvcc/version_edit_test.cc
+add_executable(version_delta_test
+  src/mvcc/version_delta_test.cc
 )
-target_link_libraries(version_edit_test
+target_link_libraries(version_delta_test
   PRIVATE
     lsmdb_mvcc
     GTest::GTest
     GTest::Main
     pthread
 )
-target_include_directories(version_edit_test
+target_include_directories(version_delta_test
   PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
