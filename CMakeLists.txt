@@ -126,6 +126,27 @@ target_include_directories(lsmdb_mvcc
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
 
+# ──────────────────── DB 数据库主逻辑 ────────────────────
+
+add_library(lsmdb_db
+  src/db/builder.cc
+)
+
+target_link_libraries(lsmdb_db
+  PUBLIC
+    lsmdb_core
+  PRIVATE
+    lsmdb_sstable
+    lsmdb_mvcc
+)
+
+target_include_directories(lsmdb_db
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
+
 find_package(GTest REQUIRED)
 
 add_executable(skiplist_test
