@@ -131,6 +131,7 @@ target_include_directories(lsmdb_mvcc
 add_library(lsmdb_db
   src/db/db.cc
   src/db/builder.cc
+  src/db/snapshot.h
 )
 
 target_link_libraries(lsmdb_db
