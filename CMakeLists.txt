@@ -129,6 +129,7 @@ target_include_directories(lsmdb_mvcc
 # ──────────────────── DB 数据库主逻辑 ────────────────────
 
 add_library(lsmdb_db
+  src/db/db.cc
   src/db/builder.cc
 )
 
