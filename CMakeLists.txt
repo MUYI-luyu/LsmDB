@@ -132,6 +132,8 @@ add_library(lsmdb_db
   src/db/db.cc
   src/db/builder.cc
   src/db/snapshot.h
+  src/db/db_impl.cc
+  src/db/db_impl.h
 )
 
 target_link_libraries(lsmdb_db
