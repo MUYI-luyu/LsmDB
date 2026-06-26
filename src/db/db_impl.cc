@@ -10,6 +10,7 @@
 
 #include "db/builder.h"
 #include "db/db.h"
+#include "db/db_iter.h"
 #include "db/dbformat.h"
 #include "db/env.h"
 #include "db/filename.h"
@@ -19,6 +20,7 @@
 #include "db/table_cache.h"
 #include "db/write_batch_internal.h"
 #include "memtable/memtable.h"
+#include "sstable/iterator/merger.h"
 #include "mvcc/version_catalog.h"
 #include "utils/coding.h"
 #include "utils/logging.h"
@@ -584,17 +586,428 @@ void DBImpl::BackgroundCall() {
 
 // 后台压实主循环 —— 将在后续提交中实现完整逻辑
 void DBImpl::BackgroundMerge() {
-  // TODO: 完整实现将在后续提交中添加：
-  //   - 手动/自动 Compaction 任务选择
-  //   - TrivialMove 优化
-  //   - DoMergeWork 多路归并压实
+  // TODO: DoMergeWork 等完整 Compaction 逻辑将在后续提交中添加
   if (imm_ != nullptr) {
     CompactMemTable();
     return;
   }
 }
 
+// ──────────────────── 迭代器基础设施 ────────────────────
+
+namespace {
+
+struct IterState {
+  std::mutex* const mu;
+  Version* const version;
+  MemTable* const mem;
+  MemTable* const imm;
+
+  IterState(std::mutex* mutex, MemTable* mem, MemTable* imm, Version* version)
+      : mu(mutex), version(version), mem(mem), imm(imm) {}
+};
+
+static void CleanupIteratorState(void* arg1, void* arg2) {
+  IterState* state = reinterpret_cast<IterState*>(arg1);
+  state->mu->lock();
+  state->mem->Unref();
+  if (state->imm != nullptr) state->imm->Unref();
+  state->version->Unref();
+  state->mu->unlock();
+  delete state;
+}
+
+}  // anonymous namespace
+
+Iterator* DBImpl::NewInternalIterator(const ReadOptions& options,
+                                      SequenceNumber* latest_snapshot,
+                                      uint32_t* seed) {
+  mutex_.lock();
+  *latest_snapshot = catalog_->LastSequence();
+
+  // 收集所有需要的子迭代器：memtable → imm → SSTables
+  std::vector<Iterator*> list;
+  list.push_back(mem_->NewIterator());
+  mem_->Ref();
+  if (imm_ != nullptr) {
+    list.push_back(imm_->NewIterator());
+    imm_->Ref();
+  }
+  catalog_->current()->AddIterators(options, &list);
+  Iterator* internal_iter =
+      NewMergingIterator(&internal_comparator_, &list[0], list.size());
+  catalog_->current()->Ref();
+
+  IterState* cleanup = new IterState(&mutex_, mem_, imm_, catalog_->current());
+  internal_iter->RegisterCleanup(CleanupIteratorState, cleanup, nullptr);
+
+  *seed = ++seed_;
+  mutex_.unlock();
+  return internal_iter;
+}
+
+Iterator* DBImpl::TEST_NewInternalIterator() {
+  SequenceNumber ignored;
+  uint32_t ignored_seed;
+  return NewInternalIterator(ReadOptions(), &ignored, &ignored_seed);
+}
+
+int64_t DBImpl::TEST_MaxNextLevelOverlappingBytes() {
+  MutexLock l(&mutex_);
+  return catalog_->MaxNextLevelOverlappingBytes();
+}
+
+// ──────────────────── 读操作 ────────────────────
+
+Status DBImpl::Get(const ReadOptions& options, const Slice& key,
+                   std::string* value) {
+  Status s;
+  MutexLock l(&mutex_);
+  SequenceNumber snapshot;
+  if (options.snapshot != nullptr) {
+    snapshot =
+        static_cast<const SnapshotImpl*>(options.snapshot)->sequence_number();
+  } else {
+    snapshot = catalog_->LastSequence();
+  }
+
+  MemTable* mem = mem_;
+  MemTable* imm = imm_;
+  Version* current = catalog_->current();
+  mem->Ref();
+  if (imm != nullptr) imm->Ref();
+  current->Ref();
+
+  bool have_stat_update = false;
+  Version::GetStats stats;
+
+  // 在读取文件和 memtable 时解锁
+  {
+    mutex_.unlock();
+    LookupKey lkey(key, snapshot);
+    if (mem->Get(lkey, value, &s)) {
+      // 命中活跃 memtable
+    } else if (imm != nullptr && imm->Get(lkey, value, &s)) {
+      // 命中不可变 memtable
+    } else {
+      s = current->Get(options, lkey, value, &stats);
+      have_stat_update = true;
+    }
+    mutex_.lock();
+  }
+
+  if (have_stat_update && current->UpdateStats(stats)) {
+    MaybeScheduleMerge();
+  }
+  mem->Unref();
+  if (imm != nullptr) imm->Unref();
+  current->Unref();
+  return s;
+}
+
+Iterator* DBImpl::NewIterator(const ReadOptions& options) {
+  SequenceNumber latest_snapshot;
+  uint32_t seed;
+  Iterator* iter = NewInternalIterator(options, &latest_snapshot, &seed);
+  return NewDBIterator(this, user_comparator(), iter,
+                       (options.snapshot != nullptr
+                            ? static_cast<const SnapshotImpl*>(options.snapshot)
+                                  ->sequence_number()
+                            : latest_snapshot),
+                       seed);
+}
+
+void DBImpl::RecordReadSample(Slice key) {
+  MutexLock l(&mutex_);
+  if (catalog_->current()->RecordReadSample(key)) {
+    MaybeScheduleMerge();
+  }
+}
+
+// ──────────────────── 快照管理 ────────────────────
+
+const Snapshot* DBImpl::GetSnapshot() {
+  MutexLock l(&mutex_);
+  return snapshots_.New(catalog_->LastSequence());
+}
+
+void DBImpl::ReleaseSnapshot(const Snapshot* snapshot) {
+  MutexLock l(&mutex_);
+  snapshots_.Delete(static_cast<const SnapshotImpl*>(snapshot));
+}
+
+// ──────────────────── 写操作 ────────────────────
+
+Status DBImpl::Put(const WriteOptions& o, const Slice& key, const Slice& val) {
+  return DB::Put(o, key, val);
+}
+
+Status DBImpl::Delete(const WriteOptions& options, const Slice& key) {
+  return DB::Delete(options, key);
+}
+
+Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
+  Writer w(&mutex_);
+  w.batch = updates;
+  w.sync = options.sync;
+  w.done = false;
+
+  MutexLock l(&mutex_);
+  writers_.push_back(&w);
+  // 当前写请求必须成为 batch leader 才能执行 write group
+  while (!w.done && &w != writers_.front()) {
+    w.cv.Wait();
+  }
+  if (w.done) {
+    return w.status;
+  }
+
+  // 可能在构建 batch / 写入过程中短暂释放锁
+  Status status = ApplyBackpressure(updates == nullptr);
+  uint64_t last_sequence = catalog_->LastSequence();
+  Writer* last_writer = &w;
+  if (status.ok() && updates != nullptr) {
+    // 将队列中一段连续 writer 合并成一个 batch group
+    WriteBatch* write_batch = CoalesceWriteBatch(&last_writer);
+    WriteBatchInternal::SetSequence(write_batch, last_sequence + 1);
+    last_sequence += WriteBatchInternal::Count(write_batch);
+
+    {
+      // 释放锁执行三步写入：WAL → 可选 fsync → MemTable
+      mutex_.unlock();
+      status = log_->AddRecord(WriteBatchInternal::Contents(write_batch));
+      bool sync_error = false;
+      if (status.ok() && options.sync) {
+        status = logfile_->Sync();
+        if (!status.ok()) {
+          sync_error = true;
+        }
+      }
+      if (status.ok()) {
+        status = WriteBatchInternal::InsertInto(write_batch, mem_);
+      }
+      mutex_.lock();
+      if (sync_error) {
+        RecordBackgroundError(status);
+      }
+    }
+    if (write_batch == tmp_batch_) tmp_batch_->Clear();
+
+    catalog_->SetLastSequence(last_sequence);
+  }
+
+  // 通知 batch group 中所有等待的 writer
+  while (true) {
+    Writer* ready = writers_.front();
+    writers_.pop_front();
+    if (ready != &w) {
+      ready->status = status;
+      ready->done = true;
+      ready->cv.Signal();
+    }
+    if (ready == last_writer) break;
+  }
+
+  // 唤醒写入队列的新头部
+  if (!writers_.empty()) {
+    writers_.front()->cv.Signal();
+  }
+
+  return status;
+}
+
+WriteBatch* DBImpl::CoalesceWriteBatch(Writer** last_writer) {
+  assert(!writers_.empty());
+  Writer* first = writers_.front();
+  WriteBatch* result = first->batch;
+  assert(result != nullptr);
+
+  size_t size = WriteBatchInternal::ByteSize(first->batch);
+
+  // 动态容量上限：Leader 小请求时限制合并膨胀以控制延迟抖动
+  size_t max_size = 1 << 20;  // 硬上限 1MB
+  if (size <= (128 << 10)) {
+    max_size = size + (128 << 10);  // 软上限：Leader 体积 + 128KB
+  }
+
+  *last_writer = first;
+  std::deque<Writer*>::iterator iter = writers_.begin();
+  ++iter;
+  for (; iter != writers_.end(); ++iter) {
+    Writer* w = *iter;
+
+    if (w->sync && !first->sync) {
+      // 不合并 sync 与 non-sync 请求，否则会破坏持久性承诺
+      break;
+    }
+
+    if (w->batch != nullptr) {
+      size += WriteBatchInternal::ByteSize(w->batch);
+      if (size > max_size) {
+        break;
+      }
+
+      if (result == first->batch) {
+        result = tmp_batch_;
+        assert(WriteBatchInternal::Count(result) == 0);
+        WriteBatchInternal::Append(result, first->batch);
+      }
+      WriteBatchInternal::Append(result, w->batch);
+    }
+    *last_writer = w;
+  }
+  return result;
+}
+
+// 流控与背压：L0 文件数限速 / MemTable 写满时切换 / 等待后台刷盘
+Status DBImpl::ApplyBackpressure(bool force) {
+  assert(!writers_.empty());
+  bool allow_delay = !force;
+  Status s;
+  while (true) {
+    if (!bg_error_.ok()) {
+      s = bg_error_;
+      break;
+    } else if (allow_delay && catalog_->NumLevelFiles(0) >=
+                                  config::kL0_SlowdownWritesTrigger) {
+      // L0 文件数触及慢写阈值：每次写入休眠 1ms 以降速
+      mutex_.unlock();
+      env_->SleepForMicroseconds(1000);
+      allow_delay = false;
+      mutex_.lock();
+    } else if (!force &&
+               (mem_->ApproximateMemoryUsage() <= options_.write_buffer_size)) {
+      // MemTable 还有空间
+      break;
+    } else if (imm_ != nullptr) {
+      // 前一个 MemTable 仍在刷盘，等待后台完成
+      background_work_finished_signal_.Wait();
+    } else if (catalog_->NumLevelFiles(0) >= config::kL0_StopWritesTrigger) {
+      // L0 文件数触及硬限制，必须等待压实
+      background_work_finished_signal_.Wait();
+    } else {
+      // MemTable 写满且 imm_ 空闲：执行 MemTable 切换
+      assert(catalog_->PrevLogNumber() == 0);
+      uint64_t new_log_number = catalog_->NewFileNumber();
+      WritableFile* lfile = nullptr;
+      s = env_->NewWritableFile(LogFileName(dbname_, new_log_number), &lfile);
+      if (!s.ok()) {
+        catalog_->ReuseFileNumber(new_log_number);
+        break;
+      }
+
+      delete log_;
+      s = logfile_->Close();
+      if (!s.ok()) {
+        RecordBackgroundError(s);
+      }
+      delete logfile_;
+
+      logfile_ = lfile;
+      logfile_number_ = new_log_number;
+      log_ = new log::Writer(lfile);
+
+      imm_ = mem_;
+      has_imm_.store(true, std::memory_order_release);
+      mem_ = new MemTable(internal_comparator_);
+      mem_->Ref();
+      force = false;
+
+      MaybeScheduleMerge();
+    }
+  }
+  return s;
+}
+
+// ──────────────────── 压实入口（手动触发 / 测试辅助） ────────────────────
+
+void DBImpl::CompactRange(const Slice* begin, const Slice* end) {
+  int max_level_with_files = 1;
+  {
+    MutexLock l(&mutex_);
+    Version* base = catalog_->current();
+    for (int level = 1; level < config::kNumLevels; level++) {
+      if (base->OverlapInLevel(level, begin, end)) {
+        max_level_with_files = level;
+      }
+    }
+  }
+  TEST_CompactMemTable();
+  for (int level = 0; level < max_level_with_files; level++) {
+    TEST_CompactRange(level, begin, end);
+  }
+}
+
+void DBImpl::TEST_CompactRange(int level, const Slice* begin,
+                               const Slice* end) {
+  assert(level >= 0);
+  assert(level + 1 < config::kNumLevels);
+
+  InternalKey begin_storage, end_storage;
+
+  ManualMerge manual;
+  manual.level = level;
+  manual.done = false;
+  if (begin == nullptr) {
+    manual.begin = nullptr;
+  } else {
+    begin_storage = InternalKey(*begin, kMaxSequenceNumber, kValueTypeForSeek);
+    manual.begin = &begin_storage;
+  }
+  if (end == nullptr) {
+    manual.end = nullptr;
+  } else {
+    end_storage = InternalKey(*end, 0, static_cast<ValueType>(0));
+    manual.end = &end_storage;
+  }
+
+  MutexLock l(&mutex_);
+  while (!manual.done && !shutting_down_.load(std::memory_order_acquire) &&
+         bg_error_.ok()) {
+    if (manual_merge_ == nullptr) {
+      manual_merge_ = &manual;
+      MaybeScheduleMerge();
+    } else {
+      background_work_finished_signal_.Wait();
+    }
+  }
+  while (background_merge_scheduled_) {
+    background_work_finished_signal_.Wait();
+  }
+  if (manual_merge_ == &manual) {
+    manual_merge_ = nullptr;
+  }
+}
+
+Status DBImpl::TEST_CompactMemTable() {
+  // nullptr batch 意味着等待之前写操作的完成
+  Status s = Write(WriteOptions(), nullptr);
+  if (s.ok()) {
+    MutexLock l(&mutex_);
+    while (imm_ != nullptr && bg_error_.ok() &&
+           !shutting_down_.load(std::memory_order_acquire)) {
+      background_work_finished_signal_.Wait();
+    }
+    if (imm_ != nullptr) {
+      s = bg_error_;
+    }
+  }
+  return s;
+}
+
 // ──────────────────── 以下为 DB 基类接口实现 ────────────────────
+
+Status DB::Put(const WriteOptions& opt, const Slice& key, const Slice& value) {
+  WriteBatch batch;
+  batch.Put(key, value);
+  return Write(opt, &batch);
+}
+
+Status DB::Delete(const WriteOptions& opt, const Slice& key) {
+  WriteBatch batch;
+  batch.Delete(key);
+  return Write(opt, &batch);
+}
 
 DB::~DB() = default;
 
