@@ -21,6 +21,8 @@
 #include "db/write_batch_internal.h"
 #include "memtable/memtable.h"
 #include "sstable/iterator/merger.h"
+#include "sstable/iterator/two_level_iterator.h"
+#include "sstable/table/block.h"
 #include "mvcc/version_catalog.h"
 #include "utils/coding.h"
 #include "utils/logging.h"
@@ -584,13 +586,326 @@ void DBImpl::BackgroundCall() {
   background_work_finished_signal_.SignalAll();
 }
 
-// 后台压实主循环 —— 将在后续提交中实现完整逻辑
 void DBImpl::BackgroundMerge() {
-  // TODO: DoMergeWork 等完整 Compaction 逻辑将在后续提交中添加
   if (imm_ != nullptr) {
     CompactMemTable();
     return;
   }
+
+  MergeTask* c;
+  bool is_manual = (manual_merge_ != nullptr);
+  InternalKey manual_end;
+  if (is_manual) {
+    ManualMerge* m = manual_merge_;
+    c = catalog_->CompactRange(m->level, m->begin, m->end);
+    m->done = (c == nullptr);
+    if (c != nullptr) {
+      manual_end = c->input(0, c->num_input_files(0) - 1)->largest;
+    }
+    Log(options_.info_log,
+        "Manual compaction at level-%d from %s .. %s; will stop at %s\n",
+        m->level, (m->begin ? m->begin->DebugString().c_str() : "(begin)"),
+        (m->end ? m->end->DebugString().c_str() : "(end)"),
+        (m->done ? "(end)" : manual_end.DebugString().c_str()));
+  } else {
+    c = catalog_->SelectMergeCandidate();
+  }
+
+  Status status;
+  if (c == nullptr) {
+    // 无事可做
+  } else if (!is_manual && c->IsTrivialMove()) {
+    // TrivialMove 优化：文件直接移至下一层级
+    assert(c->num_input_files(0) == 1);
+    SSTableDescriptor* f = c->input(0, 0);
+    c->edit()->RemoveFile(c->level(), f->number);
+    c->edit()->AddFile(c->level() + 1, f->number, f->file_size, f->smallest,
+                       f->largest);
+    status = catalog_->CommitDelta(c->edit(), &mutex_);
+    if (!status.ok()) {
+      RecordBackgroundError(status);
+    }
+    VersionCatalog::LevelSummaryStorage tmp;
+    Log(options_.info_log, "Moved #%lld to level-%d %lld bytes %s: %s\n",
+        static_cast<unsigned long long>(f->number), c->level() + 1,
+        static_cast<unsigned long long>(f->file_size),
+        status.ToString().c_str(), catalog_->LevelSummary(&tmp));
+  } else {
+    MergeTaskState* compact = new MergeTaskState(c);
+    status = DoMergeWork(compact);
+    if (!status.ok()) {
+      RecordBackgroundError(status);
+    }
+    CleanupMerge(compact);
+    c->ReleaseInputs();
+    RemoveObsoleteFiles();
+  }
+  delete c;
+
+  if (status.ok()) {
+    // 完成
+  } else if (shutting_down_.load(std::memory_order_acquire)) {
+    // 忽略关闭期间的 compaction 错误
+  } else {
+    Log(options_.info_log, "Compaction error: %s", status.ToString().c_str());
+  }
+
+  if (is_manual) {
+    ManualMerge* m = manual_merge_;
+    if (!status.ok()) {
+      m->done = true;
+    }
+    if (!m->done) {
+      m->tmp_storage = manual_end;
+      m->begin = &m->tmp_storage;
+    }
+    manual_merge_ = nullptr;
+  }
+}
+
+// ──────────────────── Compaction 辅助函数 ────────────────────
+
+void DBImpl::CleanupMerge(MergeTaskState* compact) {
+  if (compact->builder != nullptr) {
+    compact->builder->Abandon();
+    delete compact->builder;
+  } else {
+    assert(compact->outfile == nullptr);
+  }
+  delete compact->outfile;
+  for (size_t i = 0; i < compact->outputs.size(); i++) {
+    const MergeTaskState::Output& out = compact->outputs[i];
+    pending_outputs_.erase(out.number);
+  }
+  delete compact;
+}
+
+Status DBImpl::OpenMergeOutputFile(MergeTaskState* compact) {
+  assert(compact != nullptr);
+  assert(compact->builder == nullptr);
+  uint64_t file_number;
+  {
+    mutex_.lock();
+    file_number = catalog_->NewFileNumber();
+    pending_outputs_.insert(file_number);
+    MergeTaskState::Output out;
+    out.number = file_number;
+    out.smallest.Clear();
+    out.largest.Clear();
+    compact->outputs.push_back(out);
+    mutex_.unlock();
+  }
+
+  std::string fname = TableFileName(dbname_, file_number);
+  Status s = env_->NewWritableFile(fname, &compact->outfile);
+  if (s.ok()) {
+    compact->builder = new TableBuilder(options_, compact->outfile);
+  }
+  return s;
+}
+
+Status DBImpl::FinishMergeOutputFile(MergeTaskState* compact,
+                                     Iterator* input) {
+  assert(compact != nullptr);
+  assert(compact->outfile != nullptr);
+  assert(compact->builder != nullptr);
+
+  const uint64_t output_number = compact->current_output()->number;
+  assert(output_number != 0);
+
+  Status s = input->status();
+  const uint64_t current_entries = compact->builder->NumEntries();
+  if (s.ok()) {
+    s = compact->builder->Finish();
+  } else {
+    compact->builder->Abandon();
+  }
+  const uint64_t current_bytes = compact->builder->FileSize();
+  compact->current_output()->file_size = current_bytes;
+  compact->total_bytes += current_bytes;
+  delete compact->builder;
+  compact->builder = nullptr;
+
+  if (s.ok()) {
+    s = compact->outfile->Sync();
+  }
+  if (s.ok()) {
+    s = compact->outfile->Close();
+  }
+  delete compact->outfile;
+  compact->outfile = nullptr;
+
+  if (s.ok() && current_entries > 0) {
+    // 验证生成的表可被正确打开
+    Iterator* iter =
+        table_cache_->NewIterator(ReadOptions(), output_number, current_bytes);
+    s = iter->status();
+    delete iter;
+    if (s.ok()) {
+      Log(options_.info_log, "Generated table #%llu@%d: %lld keys, %lld bytes",
+          (unsigned long long)output_number, compact->merge->level(),
+          (unsigned long long)current_entries,
+          (unsigned long long)current_bytes);
+    }
+  }
+  return s;
+}
+
+Status DBImpl::InstallMergeResults(MergeTaskState* compact) {
+  Log(options_.info_log, "Compacted %d@%d + %d@%d files => %lld bytes",
+      compact->merge->num_input_files(0), compact->merge->level(),
+      compact->merge->num_input_files(1), compact->merge->level() + 1,
+      static_cast<long long>(compact->total_bytes));
+
+  compact->merge->AddInputDeletions(compact->merge->edit());
+  const int level = compact->merge->level();
+  for (size_t i = 0; i < compact->outputs.size(); i++) {
+    const MergeTaskState::Output& out = compact->outputs[i];
+    compact->merge->edit()->AddFile(level + 1, out.number, out.file_size,
+                                    out.smallest, out.largest);
+  }
+  return catalog_->CommitDelta(compact->merge->edit(), &mutex_);
+}
+
+Status DBImpl::DoMergeWork(MergeTaskState* compact) {
+  const uint64_t start_micros = env_->NowMicros();
+  int64_t imm_micros = 0;
+
+  Log(options_.info_log, "Compacting %d@%d + %d@%d files",
+      compact->merge->num_input_files(0), compact->merge->level(),
+      compact->merge->num_input_files(1),
+      compact->merge->level() + 1);
+
+  assert(catalog_->NumLevelFiles(compact->merge->level()) > 0);
+  assert(compact->builder == nullptr);
+  assert(compact->outfile == nullptr);
+  if (snapshots_.empty()) {
+    compact->smallest_snapshot = catalog_->LastSequence();
+  } else {
+    compact->smallest_snapshot = snapshots_.oldest()->sequence_number();
+  }
+
+  Iterator* input = catalog_->MakeInputIterator(compact->merge);
+
+  // 在实际做 compaction 工作时释放锁
+  mutex_.unlock();
+
+  input->SeekToFirst();
+  Status status;
+  ParsedInternalKey ikey;
+  std::string current_user_key;
+  bool has_current_user_key = false;
+  SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
+  while (input->Valid() && !shutting_down_.load(std::memory_order_acquire)) {
+    // 优先处理 imm_ 的刷盘工作
+    if (has_imm_.load(std::memory_order_relaxed)) {
+      const uint64_t imm_start = env_->NowMicros();
+      mutex_.lock();
+      if (imm_ != nullptr) {
+        CompactMemTable();
+        background_work_finished_signal_.SignalAll();
+      }
+      mutex_.unlock();
+      imm_micros += (env_->NowMicros() - imm_start);
+    }
+
+    Slice key = input->key();
+    if (compact->merge->ShouldStopBefore(key) &&
+        compact->builder != nullptr) {
+      status = FinishMergeOutputFile(compact, input);
+      if (!status.ok()) {
+        break;
+      }
+    }
+
+    // 处理键值：判断是否可丢弃（被更新版本覆盖 / 墓碑可清理）
+    bool drop = false;
+    if (!ParseInternalKey(key, &ikey)) {
+      current_user_key.clear();
+      has_current_user_key = false;
+      last_sequence_for_key = kMaxSequenceNumber;
+    } else {
+      if (!has_current_user_key ||
+          user_comparator()->Compare(ikey.user_key, Slice(current_user_key)) !=
+              0) {
+        current_user_key.assign(ikey.user_key.data(), ikey.user_key.size());
+        has_current_user_key = true;
+        last_sequence_for_key = kMaxSequenceNumber;
+      }
+
+      if (last_sequence_for_key <= compact->smallest_snapshot) {
+        // 被同键更新的条目隐藏
+        drop = true;
+      } else if (ikey.type == kTypeDeletion &&
+                 ikey.sequence <= compact->smallest_snapshot &&
+                 compact->merge->IsBaseLevelForKey(ikey.user_key)) {
+        // 墓碑标记在底层无数据可删除，可安全丢弃
+        drop = true;
+      }
+
+      last_sequence_for_key = ikey.sequence;
+    }
+
+    if (!drop) {
+      if (compact->builder == nullptr) {
+        status = OpenMergeOutputFile(compact);
+        if (!status.ok()) {
+          break;
+        }
+      }
+      if (compact->builder->NumEntries() == 0) {
+        compact->current_output()->smallest.DecodeFrom(key);
+      }
+      compact->current_output()->largest.DecodeFrom(key);
+      compact->builder->Add(key, input->value());
+
+      if (compact->builder->FileSize() >=
+          compact->merge->MaxOutputFileSize()) {
+        status = FinishMergeOutputFile(compact, input);
+        if (!status.ok()) {
+          break;
+        }
+      }
+    }
+
+    input->Next();
+  }
+
+  if (status.ok() && shutting_down_.load(std::memory_order_acquire)) {
+    status = Status::IOError("Deleting DB during compaction");
+  }
+  if (status.ok() && compact->builder != nullptr) {
+    status = FinishMergeOutputFile(compact, input);
+  }
+  if (status.ok()) {
+    status = input->status();
+  }
+  delete input;
+  input = nullptr;
+
+  MergeStats stats;
+  stats.micros = env_->NowMicros() - start_micros - imm_micros;
+  for (int which = 0; which < 2; which++) {
+    for (int i = 0; i < compact->merge->num_input_files(which); i++) {
+      stats.bytes_read += compact->merge->input(which, i)->file_size;
+    }
+  }
+  for (size_t i = 0; i < compact->outputs.size(); i++) {
+    stats.bytes_written += compact->outputs[i].file_size;
+  }
+
+  mutex_.lock();
+  stats_[compact->merge->level() + 1].Add(stats);
+
+  if (status.ok()) {
+    status = InstallMergeResults(compact);
+  }
+  if (!status.ok()) {
+    RecordBackgroundError(status);
+  }
+  VersionCatalog::LevelSummaryStorage tmp;
+  Log(options_.info_log, "compacted to: %s", catalog_->LevelSummary(&tmp));
+  return status;
 }
 
 // ──────────────────── 迭代器基础设施 ────────────────────
@@ -995,6 +1310,84 @@ Status DBImpl::TEST_CompactMemTable() {
   return s;
 }
 
+// ──────────────────── 属性查询与统计 ────────────────────
+
+bool DBImpl::GetProperty(const Slice& property, std::string* value) {
+  value->clear();
+
+  MutexLock l(&mutex_);
+  Slice in = property;
+  Slice prefix("lsmdb.");
+  if (!in.starts_with(prefix)) return false;
+  in.remove_prefix(prefix.size());
+
+  if (in.starts_with("num-files-at-level")) {
+    in.remove_prefix(strlen("num-files-at-level"));
+    uint64_t level;
+    bool ok = ConsumeDecimalNumber(&in, &level) && in.empty();
+    if (!ok || level >= config::kNumLevels) {
+      return false;
+    } else {
+      char buf[100];
+      std::snprintf(buf, sizeof(buf), "%d",
+                    catalog_->NumLevelFiles(static_cast<int>(level)));
+      *value = buf;
+      return true;
+    }
+  } else if (in == "stats") {
+    char buf[200];
+    std::snprintf(buf, sizeof(buf),
+                  "                               Compactions\n"
+                  "Level  Files Size(MB) Time(sec) Read(MB) Write(MB)\n"
+                  "--------------------------------------------------\n");
+    value->append(buf);
+    for (int level = 0; level < config::kNumLevels; level++) {
+      int files = catalog_->NumLevelFiles(level);
+      if (stats_[level].micros > 0 || files > 0) {
+        std::snprintf(buf, sizeof(buf), "%3d %8d %8.0f %9.0f %8.0f %9.0f\n",
+                      level, files, catalog_->NumLevelBytes(level) / 1048576.0,
+                      stats_[level].micros / 1e6,
+                      stats_[level].bytes_read / 1048576.0,
+                      stats_[level].bytes_written / 1048576.0);
+        value->append(buf);
+      }
+    }
+    return true;
+  } else if (in == "sstables") {
+    *value = catalog_->current()->DebugString();
+    return true;
+  } else if (in == "approximate-memory-usage") {
+    size_t total_usage = options_.block_cache->TotalCharge();
+    if (mem_) {
+      total_usage += mem_->ApproximateMemoryUsage();
+    }
+    if (imm_) {
+      total_usage += imm_->ApproximateMemoryUsage();
+    }
+    char buf[50];
+    std::snprintf(buf, sizeof(buf), "%llu",
+                  static_cast<unsigned long long>(total_usage));
+    value->append(buf);
+    return true;
+  }
+
+  return false;
+}
+
+void DBImpl::GetApproximateSizes(const Range* range, int n, uint64_t* sizes) {
+  MutexLock l(&mutex_);
+  Version* v = catalog_->current();
+  v->Ref();
+  for (int i = 0; i < n; i++) {
+    InternalKey k1(range[i].start, kMaxSequenceNumber, kValueTypeForSeek);
+    InternalKey k2(range[i].limit, kMaxSequenceNumber, kValueTypeForSeek);
+    uint64_t start = catalog_->ApproximateOffsetOf(v, k1);
+    uint64_t limit = catalog_->ApproximateOffsetOf(v, k2);
+    sizes[i] = (limit >= start ? limit - start : 0);
+  }
+  v->Unref();
+}
+
 // ──────────────────── 以下为 DB 基类接口实现 ────────────────────
 
 Status DB::Put(const WriteOptions& opt, const Slice& key, const Slice& value) {
@@ -1052,6 +1445,36 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
     delete impl;
   }
   return s;
+}
+
+Status DestroyDB(const std::string& dbname, const Options& options) {
+  Env* env = options.env;
+  std::vector<std::string> filenames;
+  Status result = env->GetChildren(dbname, &filenames);
+  if (!result.ok()) {
+    return Status::OK();
+  }
+
+  FileLock* lock;
+  const std::string lockname = LockFileName(dbname);
+  result = env->LockFile(lockname, &lock);
+  if (result.ok()) {
+    uint64_t number;
+    FileType type;
+    for (size_t i = 0; i < filenames.size(); i++) {
+      if (ParseFileName(filenames[i], &number, &type) &&
+          type != kDBLockFile) {
+        Status del = env->RemoveFile(dbname + "/" + filenames[i]);
+        if (result.ok() && !del.ok()) {
+          result = del;
+        }
+      }
+    }
+    env->UnlockFile(lock);
+    env->RemoveFile(lockname);
+    env->RemoveDir(dbname);
+  }
+  return result;
 }
 
 }  // namespace lsmdb

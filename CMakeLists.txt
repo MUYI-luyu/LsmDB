@@ -127,10 +127,10 @@ target_include_directories(lsmdb_mvcc
 )
 
 # ──────────────────── DB 数据库主逻辑 ────────────────────
-#   db.cc        公共接口基类实现
+#   db.cc        公共接口基类实现（Snapshot/DB 析构、DB::Open、DestroyDB）
 #   builder.cc   构建器：MemTable → SSTable 持久化
 #   snapshot.h   快照隔离：双向链表管理 MVCC 读视图
-#   db_impl.cc   数据库引擎：初始化恢复、读写路径、压实调度
+#   db_impl.cc   数据库引擎：初始化恢复、读写路径、压实调度、属性统计
 
 add_library(lsmdb_db
   src/db/db.cc
