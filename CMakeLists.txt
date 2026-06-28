@@ -135,6 +135,8 @@ target_include_directories(lsmdb_mvcc
 add_library(lsmdb_db
   src/db/db.cc
   src/db/builder.cc
+  src/db/db_iter.cc
+  src/db/db_iter.h
   src/db/snapshot.h
   src/db/db_impl.cc
   src/db/db_impl.h
