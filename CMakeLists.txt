@@ -286,3 +286,20 @@ target_include_directories(version_catalog_test
   PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
+
+# ──────────────────── DB Format 单元测试 ────────────────────
+
+add_executable(dbformat_test
+  src/db/dbformat_test.cc
+)
+target_link_libraries(dbformat_test
+  PRIVATE
+    lsmdb_memtable
+    GTest::GTest
+    GTest::Main
+    pthread
+)
+target_include_directories(dbformat_test
+  PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
