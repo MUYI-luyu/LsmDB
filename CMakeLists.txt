@@ -303,3 +303,23 @@ target_include_directories(dbformat_test
   PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
+
+# ──────────────────── SSTable 集成测试 ────────────────────
+# 通过 Table/Block/MemTable/DB 四种 Constructor 测试：
+#   正向/反向扫描、随机 Seek、近似偏移量、压缩场景
+
+add_executable(sstable_test
+  src/sstable/sstable_test.cc
+)
+target_link_libraries(sstable_test
+  PRIVATE
+    lsmdb_db
+    lsmdb_writebatch
+    GTest::GTest
+    GTest::Main
+    pthread
+)
+target_include_directories(sstable_test
+  PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
