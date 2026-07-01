@@ -181,7 +181,7 @@ class LookupKey {
   Slice user_key() const { return Slice(kstart_, end_ - kstart_ - 8); }
 
  private:
-  // 我们在内部紧凑地构造了一个连续的字符数组，其物理内存布局如下：
+  // db在内部紧凑地构造了一个连续的字符数组，其物理内存布局如下：
   //    klength  varint32               <-- start_ （整个数组的起点）
   //    userkey  char[klength]          <-- kstart_（用户键数据的起点）
   //    tag      uint64（Seq + Type）

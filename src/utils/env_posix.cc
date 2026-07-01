@@ -16,6 +16,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdarg>
@@ -24,6 +25,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <queue>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -110,7 +112,7 @@ class PosixWritableFile : public WritableFile {
   }
 
   Status Append(const Slice& data) override {
-    size_t r = fwrite_unlocked(data.data(), 1, data.size(), file_);
+    size_t r = fwrite(data.data(), 1, data.size(), file_);
     if (r != data.size()) {
       return Status::IOError(filename_, std::strerror(errno));
     }
@@ -127,14 +129,14 @@ class PosixWritableFile : public WritableFile {
   }
 
   Status Flush() override {
-    if (fflush_unlocked(file_) != 0) {
+    if (fflush(file_) != 0) {
       return Status::IOError(filename_, std::strerror(errno));
     }
     return Status::OK();
   }
 
   Status Sync() override {
-    if (fflush_unlocked(file_) != 0) {
+    if (fflush(file_) != 0) {
       return Status::IOError(filename_, std::strerror(errno));
     }
     if (fsync(fileno(file_)) != 0) {
@@ -215,7 +217,7 @@ class PosixFileLock : public FileLock {
 class PosixEnv : public Env {
  public:
   PosixEnv();
-  ~PosixEnv() override {}
+  ~PosixEnv() override;
 
   Status NewSequentialFile(const std::string& fname,
                            SequentialFile** result) override {
@@ -227,7 +229,8 @@ class PosixEnv : public Env {
     *result = new PosixSequentialFile(fname, f);
     return Status::OK();
   }
-
+  
+  // 打开一个文件，并包装成一个“可随机读取的文件对象”返回给上层。
   Status NewRandomAccessFile(const std::string& fname,
                              RandomAccessFile** result) override {
     *result = nullptr;
@@ -315,10 +318,31 @@ class PosixEnv : public Env {
 
   Status LockFile(const std::string& fname, FileLock** lock) override {
     *lock = nullptr;
+
+    // 同进程锁拦截：防止同一个进程内对同一文件重复加锁.
+    // fcntl(F_SETLK) 是进程级别的，相同进程的第二次调用会静默覆盖前一次锁。
+    // 若不在用户态拦截，DestroyOpenDB 和 Locking 等单测将无法正确检测锁冲突。
+    {
+      std::lock_guard<std::mutex> l(lock_mu_);
+      if (!locked_files_.insert(fname).second) {
+        return Status::IOError("lock " + fname,
+                               "already held by this process");
+      }
+    }
+
     int fd = open(fname.c_str(), O_RDWR | O_CREAT, 0644);
-    if (fd < 0) return Status::IOError(fname, std::strerror(errno));
+    if (fd < 0) {
+      std::lock_guard<std::mutex> l(lock_mu_);
+      locked_files_.erase(fname);
+      return Status::IOError(fname, std::strerror(errno));
+    }
     Status s = FDSetCloexec(fd);
-    if (!s.ok()) { close(fd); return s; }
+    if (!s.ok()) {
+      close(fd);
+      std::lock_guard<std::mutex> l(lock_mu_);
+      locked_files_.erase(fname);
+      return s;
+    }
     struct flock fl;
     memset(&fl, 0, sizeof(fl));
     fl.l_type = F_WRLCK;
@@ -327,6 +351,8 @@ class PosixEnv : public Env {
     fl.l_len = 0;
     if (fcntl(fd, F_SETLK, &fl) == -1) {
       close(fd);
+      std::lock_guard<std::mutex> l(lock_mu_);
+      locked_files_.erase(fname);
       return Status::IOError("lock " + fname, std::strerror(errno));
     }
     PosixFileLock* my_lock = new PosixFileLock;
@@ -347,6 +373,10 @@ class PosixEnv : public Env {
     if (fcntl(my_lock->fd_, F_SETLK, &fl) == -1)
       return Status::IOError("unlock", std::strerror(errno));
     close(my_lock->fd_);
+    {
+      std::lock_guard<std::mutex> l(lock_mu_);
+      locked_files_.erase(my_lock->name_);
+    }
     delete my_lock;
     return Status::OK();
   }
@@ -356,8 +386,7 @@ class PosixEnv : public Env {
     queue_.push({function, arg});
     if (!started_) {
       started_ = true;
-      std::thread t(BGThreadWrapper, this);
-      t.detach();
+      bg_thread_ = std::thread(BGThreadWrapper, this);
     }
     cv_.notify_one();
   }
@@ -405,7 +434,15 @@ class PosixEnv : public Env {
   std::mutex mu_;
   std::condition_variable cv_;
   bool started_;
+  std::atomic<bool> exiting_;
+  std::thread bg_thread_;
   std::queue<std::pair<void (*)(void*), void*>> queue_;
+
+  // 同进程文件锁追踪：fcntl 锁是 per-process 的，
+  // 相同进程第二次加锁会静默覆盖前一次。此集合确保在同进程内
+  // 对同一文件只允许加一次锁，第二次会返回 "already held" 错误。
+  std::mutex lock_mu_;
+  std::set<std::string> locked_files_;
 
   static void BGThreadWrapper(void* arg) {
     reinterpret_cast<PosixEnv*>(arg)->BGThread();
@@ -416,7 +453,8 @@ class PosixEnv : public Env {
       void* arg = nullptr;
       {
         std::unique_lock<std::mutex> lock(mu_);
-        cv_.wait(lock, [this] { return !queue_.empty(); });
+        cv_.wait(lock, [this] { return !queue_.empty() || exiting_.load(); });
+        if (exiting_.load() && queue_.empty()) return;
         function = queue_.front().first;
         arg = queue_.front().second;
         queue_.pop();
@@ -426,7 +464,13 @@ class PosixEnv : public Env {
   }
 };
 
-PosixEnv::PosixEnv() : started_(false) {}
+PosixEnv::PosixEnv() : started_(false), exiting_(false) {}
+
+PosixEnv::~PosixEnv() {
+  exiting_.store(true);
+  cv_.notify_one();
+  if (bg_thread_.joinable()) bg_thread_.join();
+}
 
 }  // anonymous namespace
 

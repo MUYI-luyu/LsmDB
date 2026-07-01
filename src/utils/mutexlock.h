@@ -17,15 +17,11 @@ class MutexLock {
   std::mutex* const mu_;
 };
 
-// A simple wrapper around std::condition_variable that works with
-// MutexLock / std::mutex*, matching the original LevelDB port::CondVar API.
 class CondVar {
  public:
   explicit CondVar(std::mutex* mu) : mu_(mu) {}
   ~CondVar() = default;
 
-  // Wait on the condition variable.  The associated mutex must be
-  // locked by the calling thread before calling Wait().
   void Wait() {
     std::unique_lock<std::mutex> lock(*mu_, std::adopt_lock);
     cv_.wait(lock);

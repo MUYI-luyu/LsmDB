@@ -28,7 +28,7 @@ std::string LogFileName(const std::string& dbname, uint64_t number);
 // 返回指定数据库中、具有指定编号的 SSTable 文件名。
 std::string TableFileName(const std::string& dbname, uint64_t number);
 
-// 返回指定数据库中、具有指定版本号（Incarnation Number）的描述符文件（Manifest）名。
+// 返回指定数据库中、具有指定版本号（Incarnation Number）的 MANIFEST 文件（Manifest）名。
 // 返回的文件名会以 "dbname" 作为路径前缀。
 std::string DescriptorFileName(const std::string& dbname, uint64_t number);
 
@@ -56,7 +56,7 @@ std::string OldInfoLogFileName(const std::string& dbname);
 bool ParseFileName(const std::string& filename, uint64_t* number,
                    FileType* type);
 
-// 使 CURRENT 文件指向指定编号的描述符文件（Manifest）。
+// 使 CURRENT 文件指向指定编号的MANIFEST 文件（Manifest）。
 Status SetCurrentFile(Env* env, const std::string& dbname,
                       uint64_t descriptor_number);
 

@@ -15,16 +15,16 @@ struct ReadOptions;
 // BlockHandle 是指向存储数据块或元块的文件范围的指针。
 class BlockHandle {
  public:
-  // Maximum encoding length of a BlockHandle
+  // BlockHandle 编码的最大长度
   static constexpr int kMaxEncodedLength = 10 + 10;
 
   BlockHandle();
 
-  // The offset of the block in the file.
+  // 文件中该块的偏移量。
   [[nodiscard]] uint64_t offset() const noexcept { return offset_; }
   void set_offset(uint64_t offset) { offset_ = offset; }
 
-  // The size of the stored block
+  // 存储块的大小。
   [[nodiscard]] uint64_t size() const noexcept { return size_; }
   void set_size(uint64_t size) { size_ = size; }
 
@@ -40,20 +40,19 @@ class BlockHandle {
 // end of every table file.
 class Footer {
  public:
-  // Encoded length of a Footer.  Note that the serialization of a
-  // Footer will always occupy exactly this many bytes.  It consists
-  // of two block handles and a magic number.
+  // Footer 的编码长度。注意，Footer 的序列化总是占用恰好这么多字节。
+  // 它由两个 BlockHandle 和一个魔数组成。
   static constexpr int kEncodedLength = 2 * BlockHandle::kMaxEncodedLength + 8;
 
   Footer() = default;
 
-  // The block handle for the metaindex block of the table
+  // 表的 metaindex 块对应的 BlockHandle
   [[nodiscard]] const BlockHandle& metaindex_handle() const noexcept {
     return metaindex_handle_;
   }
   void set_metaindex_handle(const BlockHandle& h) { metaindex_handle_ = h; }
 
-  // The block handle for the index block of the table
+  // 表的 index 块对应的 BlockHandle
   [[nodiscard]] const BlockHandle& index_handle() const noexcept {
     return index_handle_;
   }
@@ -67,26 +66,23 @@ class Footer {
   BlockHandle index_handle_;
 };
 
-// kTableMagicNumber was picked by running
+// kTableMagicNumber 是通过运行
 //    echo LsmDB | sha1sum
-// and taking the leading 64 bits.
+// 并取其前 64 位生成的。
 static constexpr uint64_t kTableMagicNumber = 0xdb4775248b80fb57ull;
 
-// 1-byte type + 32-bit crc
+// 1 字节类型 + 32 位 CRC
 static constexpr size_t kBlockTrailerSize = 5;
 
 struct BlockContents {
-  Slice data;           // Actual contents of data
-  bool cachable;        // True iff data can be cached
-  bool heap_allocated;  // True iff caller should delete[] data.data()
+  Slice data;           // 数据的实际内容
+  bool cachable;        // 数据是否可缓存 
+  bool heap_allocated;  // 调用者是否应 delete[] data.data()
 };
 
-// Read the block identified by "handle" from "file".  On failure
-// return non-OK.  On success fill *result and return OK.
+// 从 `file` 中读取由 `handle` 指定的块。失败返回非 OK；成功时填充 *result 并返回 OK。
 Status ReadBlock(RandomAccessFile* file, const ReadOptions& options,
                  const BlockHandle& handle, BlockContents* result);
-
-// Implementation details follow.  Clients should ignore,
 
 inline BlockHandle::BlockHandle()
     : offset_(~static_cast<uint64_t>(0)), size_(~static_cast<uint64_t>(0)) {}

@@ -1,5 +1,4 @@
 #include "sstable/iterator/merger.h"
-
 #include "db/comparator.h"
 #include "db/iterator.h"
 #include "sstable/iterator/iterator_wrapper.h"
@@ -167,7 +166,7 @@ void MergingIterator::FindLargest() {
   }
   current_ = largest;
 }
-}  // namespace
+}
 
 Iterator* NewMergingIterator(const Comparator* comparator, Iterator** children,
                              int n) {
