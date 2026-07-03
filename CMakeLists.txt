@@ -323,3 +323,23 @@ target_include_directories(sstable_test
   PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
+
+# ──────────────────── DB 集成测试 ────────────────────
+# 全覆盖测试：Open/Close、Put/Get/Delete、WriteBatch、
+#   迭代器、快照隔离、Compaction、Recovery、故障注入
+
+add_executable(db_test
+  src/db/db_test.cc
+)
+target_link_libraries(db_test
+  PRIVATE
+    lsmdb_db
+    lsmdb_writebatch
+    GTest::GTest
+    GTest::Main
+    pthread
+)
+target_include_directories(db_test
+  PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
