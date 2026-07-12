@@ -13,6 +13,7 @@
 #include "db/db_iter.h"
 #include "db/dbformat.h"
 #include "db/env.h"
+#include "db/filter_policy.h"
 #include "db/filename.h"
 #include "db/status.h"
 #include "db/table.h"
@@ -102,6 +103,13 @@ Options SanitizeOptions(const std::string& dbname,
   if (result.block_cache == nullptr) {
     result.block_cache = NewLRUCache(8 << 20);
   }
+  if (result.filter_policy == nullptr &&
+      result.comparator != nullptr &&
+      std::string(result.comparator->Name()) == "lsmdb.BytewiseComparator") {
+    // 仅对默认字节序比较器启用布隆过滤器，避免自定义比较器的键等价语义不一致
+    // bits_per_key=10 → 哈希函数数 k≈7，误判率 ~1%
+    result.filter_policy = new FilterPolicy(10);
+  }
   return result;
 }
 
@@ -115,6 +123,7 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       options_(SanitizeOptions(dbname, &internal_comparator_, raw_options)),
       owns_info_log_(options_.info_log != raw_options.info_log),
       owns_cache_(options_.block_cache != raw_options.block_cache),
+      owns_filter_policy_(options_.filter_policy != raw_options.filter_policy),
       dbname_(dbname),
       table_cache_(new TableCache(dbname_, &options_, TableCacheSize(options_))),
       db_lock_(nullptr),
@@ -159,6 +168,9 @@ DBImpl::~DBImpl() {
   }
   if (owns_cache_) {
     delete options_.block_cache;
+  }
+  if (owns_filter_policy_) {
+    delete options_.filter_policy;
   }
 }
 

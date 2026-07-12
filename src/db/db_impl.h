@@ -158,6 +158,8 @@ class DBImpl : public DB {
   const bool owns_info_log_;
   // 是否拥有 Block Cache（数据块缓存）的所有权（若为 true，析构时 DBImpl 负责释放对应的 Cache 内存）
   const bool owns_cache_;
+  // 是否拥有 Filter Policy 的所有权（SanitizeOptions 创建的默认布隆过滤器）
+  const bool owns_filter_policy_;
   const std::string dbname_;
 
   // table_cache_ 内部提供了它自己的同步机制
