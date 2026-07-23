@@ -345,3 +345,21 @@ target_include_directories(db_test
   PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
+
+# ──────────────────── 性能 Benchmark ────────────────────
+# 独立可执行文件，不依赖 GTest。
+# 覆盖：顺序写、随机写、顺序读、随机读命中/不命中、更新覆盖、混合读写
+# 布隆过滤器对比：读不命中的 IO 被布隆在 SSTable 入口拦截
+
+add_executable(bench
+  bench/bench.cc
+)
+target_link_libraries(bench
+  PRIVATE
+    lsmdb_db
+    lsmdb_writebatch
+)
+target_include_directories(bench
+  PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)

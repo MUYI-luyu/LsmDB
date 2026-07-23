@@ -21,6 +21,49 @@
 
 ---
 
+
+## 性能概览
+
+> 测试环境：AMD Ryzen 7 7735H (16 核)，NVMe SSD，Linux  
+> 测试参数：key = 16 B，value = 100 B，Snappy 压缩开启，布隆过滤器 10 bits/key (~1% 误判率)  
+> 运行方式：`mkdir build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j bench && ./bench`
+
+### 全场景吞吐 (N = 500,000，布隆 ON)
+
+| 场景 | 吞吐 | 带宽 | 单次操作 |
+|------|------|------|---------|
+| FillSeq (顺序写) | 534K ops/s | 59.1 MB/s | 1.87 μs |
+| FillRandom (随机写) | 501K ops/s | 55.4 MB/s | 2.00 μs |
+| ReadSeq (顺序读) | 3.64M ops/s | — | 0.27 μs |
+| ReadRandomHit (随机读命中) | 286K ops/s | — | 3.50 μs |
+| ReadMiss (随机读不命中) | 403K ops/s | — | 2.48 μs |
+| Overwrite (更新覆盖) | 529K ops/s | 58.5 MB/s | 1.89 μs |
+| ReadWriteMix (读 70% + 写 30%) | 242K ops/s | 8.0 MB/s | 4.14 μs |
+
+### 布隆过滤器加速效果 (N = 1,000,000)
+
+写入策略：偶数 key (`0, 2, 4, …`) 作为 FillSeq + FillRandom 数据，奇数 key (`1, 3, 5, …`) 作为不命中查询目标。奇数 key 均匀交错在数据 key 字典序之间，确保每个 miss 查询必须走完整 index → data block 搜索路径，不被 SSTable boundary check 捷径跳过。
+
+| 场景 | 布隆 ON | 布隆 OFF | 加速比 |
+|------|---------|----------|--------|
+| ReadMiss (暖缓存) | 2.16M ops/s | 1.59M ops/s | **1.36x** |
+| ReadMiss (冷块缓存，DB 重新打开) | 2.04M ops/s | 1.55M ops/s | **1.31x** |
+
+布隆过滤器在 filter block 层面拦截不命中的 key，无需穿透到 data block 做二分查找确认，有效减少热路径上的数据块读取与解压开销。
+
+### 写入路径耗时分解
+
+写入路径从用户调用到 WAL + MemTable 落盘，主要开销分布在：
+
+| 阶段 | 占比(估) | 说明 |
+|------|---------|------|
+| Snappy 压缩 | ~25% | 随机字符串不可压，但仍需走完整压缩流程 |
+| WAL 写入 + CRC32 | ~15% | 顺序写，OS 页缓存合并 |
+| MemTable 跳表插入 | ~20% | O(log N) 节点定位 + 随机层高分配 |
+| 其他 (编码/锁/调度) | ~40% | Varint 编码、Group Commit 队列操作 |
+
+---
+
 ## 快速开始
 
 ### 环境要求
